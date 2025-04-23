@@ -72,7 +72,7 @@ export default function ImageDownloader() {
   const queueProcessorTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const pagesVisitedRef = useRef(0)
   const maxPagesRef = useRef(crawlSettings.maxPages)
-  
+
   // Use a ref for visited URLs to avoid stale state issues
   const visitedUrlsRef = useRef<Set<string>>(new Set())
   const urlQueueRef = useRef<string[]>([])
@@ -357,9 +357,7 @@ export default function ImageDownloader() {
         const normalizedLink = normalizeUrl(link, pageUrl)
         // Check against both the ref and the current queue to avoid race conditions
         return (
-          normalizedLink && 
-          !visitedUrlsRef.current.has(normalizedLink) && 
-          !urlQueueRef.current.includes(normalizedLink)
+          normalizedLink && !visitedUrlsRef.current.has(normalizedLink) && !urlQueueRef.current.includes(normalizedLink)
         )
       })
 
@@ -407,7 +405,7 @@ export default function ImageDownloader() {
 
       // Get the next URL from the queue
       const nextUrl = urlQueueRef.current[0]
-      
+
       // Remove it from the queue immediately to prevent reprocessing
       const updatedQueue = urlQueueRef.current.slice(1)
       urlQueueRef.current = updatedQueue
@@ -506,10 +504,7 @@ export default function ImageDownloader() {
         if (urlQueue.length === 0) {
           setLoading(false)
           setStatus(`Crawling complete. Found ${images.length} images from ${pagesVisitedRef.current} pages.`)
-          addLog(
-            `Crawling complete. Found ${images.length} images from ${pagesVisitedRef.current} pages.`,
-            "success",
-          )
+          addLog(`Crawling complete. Found ${images.length} images from ${pagesVisitedRef.current} pages.`, "success")
         }
       }, 2000) // Wait a bit to make sure no new URLs are being added
 
@@ -783,9 +778,6 @@ export default function ImageDownloader() {
               <h3 className="text-sm font-medium mb-2">Recently Visited Pages:</h3>
               <div className="flex flex-wrap gap-2">
                 {recentlyVisitedPages.map((page, index) => (
-                  <TooltipProvider key={index}>
-                    <Tooltip>
-                        => (
                   <TooltipProvider key={index}>
                     <Tooltip>
                       <TooltipTrigger asChild>
