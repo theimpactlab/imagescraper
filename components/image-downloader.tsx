@@ -6,7 +6,7 @@ import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
-import { Download, ExternalLink, Settings, AlertCircle, CheckCircle2, Filter } from "lucide-react"
+import { Download, ExternalLink, Settings, AlertCircle, CheckCircle2, Filter, RefreshCw } from "lucide-react"
 import JSZip from "jszip"
 import { saveAs } from "file-saver"
 import { Slider } from "@/components/ui/slider"
@@ -28,6 +28,8 @@ interface ImageItem {
   height?: number
   size?: number
   type?: string
+  loadFailed?: boolean
+  retryCount?: number
 }
 
 interface CrawlSettings {
@@ -36,6 +38,7 @@ interface CrawlSettings {
   includeExternalDomains: boolean
   delayBetweenRequests: number
   includeSvgImages: boolean
+  maxRetries: number
 }
 
 interface CrawlLog {
@@ -60,6 +63,7 @@ export default function ImageDownloader() {
     includeExternalDomains: false,
     delayBetweenRequests: 1000,
     includeSvgImages: false,
+    maxRetries: 2,
   })
   const [currentStats, setCurrentStats] = useState({
     pagesVisited: 0,
@@ -69,6 +73,7 @@ export default function ImageDownloader() {
   const [crawlLogs, setCrawlLogs] = useState<CrawlLog[]>([])
   const [recentlyVisitedPages, setRecentlyVisitedPages] = useState<string[]>([])
   const [failedImages, setFailedImages] = useState<Set<string>>(new Set())
+  const [imageTypeFilter, setImageTypeFilter] = useState<string | null>(null)
 
   // Refs for tracking the crawling state
   const isProcessingRef = useRef(false)
@@ -175,6 +180,15 @@ export default function ImageDownloader() {
     }
   }
 
+  const isYouTubeThumbnail = (url: string): boolean => {
+    try {
+      const urlObj = new URL(url)
+      return urlObj.hostname === "img.youtube.com" || urlObj.hostname === "i.ytimg.com"
+    } catch (e) {
+      return false
+    }
+  }
+
   const extractLinks = (html: string, baseUrl: string): string[] => {
     const parser = new DOMParser()
     const doc = parser.parseFromString(html, "text/html")
@@ -267,6 +281,8 @@ export default function ImageDownloader() {
         width,
         height,
         type,
+        loadFailed: false,
+        retryCount: 0,
       })
     })
 
@@ -703,20 +719,70 @@ export default function ImageDownloader() {
   }
 
   // Handle image load error
-  const handleImageError = (url: string) => {
+  const handleImageError = (url: string, index: number) => {
     console.error(`Failed to load image: ${url}`)
+
+    // Add to failed images set
     setFailedImages((prev) => {
       const updated = new Set(prev)
       updated.add(url)
       return updated
     })
+
+    // Update the image item to mark it as failed
+    setImages((prevImages) => {
+      const updatedImages = [...prevImages]
+      if (updatedImages[index]) {
+        updatedImages[index] = {
+          ...updatedImages[index],
+          loadFailed: true,
+        }
+      }
+      return updatedImages
+    })
+
+    addLog(`Failed to load image: ${url}`, "error")
+  }
+
+  // Retry loading a failed image
+  const retryImage = (index: number) => {
+    const image = images[index]
+    if (!image) return
+
+    setImages((prevImages) => {
+      const updatedImages = [...prevImages]
+      updatedImages[index] = {
+        ...updatedImages[index],
+        loadFailed: false,
+        retryCount: (updatedImages[index].retryCount || 0) + 1,
+      }
+      return updatedImages
+    })
+
+    // Remove from failed images set
+    setFailedImages((prev) => {
+      const updated = new Set(prev)
+      updated.delete(image.url)
+      return updated
+    })
+
+    addLog(`Retrying image: ${image.url}`, "info")
   }
 
   // Filter images by type
-  const filterImagesByType = (type: string | null) => {
-    if (!type) return images
-    return images.filter((img) => img.type === type)
+  const filterImages = () => {
+    if (!imageTypeFilter) return images
+
+    return images.filter((img) => {
+      // Filter by type if specified
+      if (imageTypeFilter && img.type !== imageTypeFilter) {
+        return false
+      }
+      return true
+    })
   }
+
+  const filteredImages = filterImages()
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -777,6 +843,18 @@ export default function ImageDownloader() {
                   onValueChange={(value) => setCrawlSettings({ ...crawlSettings, delayBetweenRequests: value[0] })}
                 />
                 <p className="text-xs text-gray-500">Time to wait between page requests</p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Maximum Retries: {crawlSettings.maxRetries}</Label>
+                <Slider
+                  value={[crawlSettings.maxRetries]}
+                  min={0}
+                  max={5}
+                  step={1}
+                  onValueChange={(value) => setCrawlSettings({ ...crawlSettings, maxRetries: value[0] })}
+                />
+                <p className="text-xs text-gray-500">Number of times to retry loading failed images</p>
               </div>
 
               <div className="flex items-center space-x-2">
@@ -879,8 +957,10 @@ export default function ImageDownloader() {
             <>
               <div className="flex justify-between items-center mb-4">
                 <div>
-                  <span className="font-medium">{images.length} images found</span>
-                  <span className="text-gray-500 ml-2">({images.filter((img) => img.selected).length} selected)</span>
+                  <span className="font-medium">{filteredImages.length} images found</span>
+                  <span className="text-gray-500 ml-2">
+                    ({filteredImages.filter((img) => img.selected).length} selected)
+                  </span>
                 </div>
                 <div className="flex gap-2">
                   <div className="flex items-center gap-2 mr-4">
@@ -889,9 +969,9 @@ export default function ImageDownloader() {
                       <select
                         className="bg-transparent border-none focus:outline-none text-sm"
                         onChange={(e) => {
-                          const value = e.target.value === "all" ? null : e.target.value
-                          setImages(filterImagesByType(value))
+                          setImageTypeFilter(e.target.value === "all" ? null : e.target.value)
                         }}
+                        value={imageTypeFilter || "all"}
                       >
                         <option value="all">All Types</option>
                         <option value="jpeg">JPEG</option>
@@ -910,7 +990,7 @@ export default function ImageDownloader() {
                   </Button>
                   <Button
                     onClick={downloadSelected}
-                    disabled={loading || images.filter((img) => img.selected).length === 0}
+                    disabled={loading || filteredImages.filter((img) => img.selected).length === 0}
                     size="sm"
                   >
                     <Download className="mr-2 h-4 w-4" />
@@ -920,22 +1000,40 @@ export default function ImageDownloader() {
               </div>
 
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {images.map((image, index) => (
+                {filteredImages.map((image, index) => (
                   <Card key={index} className={`overflow-hidden ${image.selected ? "ring-2 ring-blue-500" : ""}`}>
                     <div className="aspect-square relative bg-gray-100 flex items-center justify-center">
-                      <img
-                        src={getProxiedImageUrl(image.url) || "/placeholder.svg"}
-                        alt={image.filename}
-                        className="max-h-full max-w-full object-contain"
-                        onError={(e) => {
-                          handleImageError(image.url)
-                          ;(e.target as HTMLImageElement).src = "/abstract-geometric-shapes.png"
-                          ;(e.target as HTMLImageElement).dataset.loadFailed = "true"
-                        }}
-                      />
+                      {image.loadFailed ? (
+                        <div className="flex flex-col items-center justify-center p-4">
+                          <AlertCircle className="h-8 w-8 text-red-500 mb-2" />
+                          <p className="text-xs text-center text-gray-500 mb-2">Failed to load image</p>
+                          {(image.retryCount || 0) < crawlSettings.maxRetries && (
+                            <Button variant="outline" size="sm" onClick={() => retryImage(index)} className="text-xs">
+                              <RefreshCw className="h-3 w-3 mr-1" />
+                              Retry
+                            </Button>
+                          )}
+                        </div>
+                      ) : (
+                        <img
+                          src={getProxiedImageUrl(image.url) || "/abstract-geometric-shapes.png"}
+                          alt={image.filename}
+                          className="max-h-full max-w-full object-contain"
+                          onError={(e) => {
+                            handleImageError(image.url, index)
+                            ;(e.target as HTMLImageElement).src = "/abstract-geometric-shapes.png"
+                            ;(e.target as HTMLImageElement).dataset.loadFailed = "true"
+                          }}
+                        />
+                      )}
                       {image.type && (
                         <Badge variant="secondary" className="absolute top-2 right-2 text-xs">
                           {image.type.toUpperCase()}
+                        </Badge>
+                      )}
+                      {isYouTubeThumbnail(image.url) && (
+                        <Badge variant="outline" className="absolute top-2 left-2 text-xs bg-red-50">
+                          YouTube
                         </Badge>
                       )}
                     </div>
