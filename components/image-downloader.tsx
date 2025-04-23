@@ -1,23 +1,37 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
-import { Download, ExternalLink, Settings } from "lucide-react"
+import { Download, ExternalLink, Settings, AlertCircle, CheckCircle2 } from "lucide-react"
 import JSZip from "jszip"
 import { saveAs } from "file-saver"
 import { Slider } from "@/components/ui/slider"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogDescription,
+} from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Progress } from "@/components/ui/progress"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Badge } from "@/components/ui/badge"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
 interface ImageItem {
   url: string
   filename: string
   selected: boolean
   sourceUrl: string
+  width?: number
+  height?: number
+  size?: number
 }
 
 interface CrawlSettings {
@@ -25,6 +39,13 @@ interface CrawlSettings {
   maxPages: number
   includeExternalDomains: boolean
   delayBetweenRequests: number
+}
+
+interface CrawlLog {
+  timestamp: Date
+  message: string
+  type: "info" | "error" | "success"
+  url?: string
 }
 
 export default function ImageDownloader() {
@@ -47,6 +68,26 @@ export default function ImageDownloader() {
     imagesFound: 0,
     currentDepth: 0,
   })
+  const [crawlLogs, setCrawlLogs] = useState<CrawlLog[]>([])
+  const [recentlyVisitedPages, setRecentlyVisitedPages] = useState<string[]>([])
+
+  // Refs for tracking the crawling state
+  const isProcessingRef = useRef(false)
+  const loadingRef = useRef(false)
+  const queueProcessorTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Update the ref when loading state changes
+  useEffect(() => {
+    loadingRef.current = loading
+  }, [loading])
+
+  // Add a log entry
+  const addLog = (message: string, type: "info" | "error" | "success", url?: string) => {
+    setCrawlLogs((prev) => [
+      { timestamp: new Date(), message, type, url },
+      ...prev.slice(0, 99), // Keep only the last 100 logs
+    ])
+  }
 
   const isValidUrl = (urlString: string): boolean => {
     try {
@@ -112,8 +153,9 @@ export default function ImageDownloader() {
       const normalizedUrl = normalizeUrl(href, baseUrl)
 
       if (
-        (normalizedUrl && !crawlSettings.includeExternalDomains && isSameDomain(normalizedUrl, baseUrl)) ||
-        crawlSettings.includeExternalDomains
+        normalizedUrl &&
+        ((!crawlSettings.includeExternalDomains && isSameDomain(normalizedUrl, baseUrl)) ||
+          crawlSettings.includeExternalDomains)
       ) {
         links.push(normalizedUrl)
       }
@@ -151,11 +193,17 @@ export default function ImageDownloader() {
         filename = `image-${pageUrl.replace(/[^a-zA-Z0-9]/g, "-")}-${index + 1}.jpg`
       }
 
+      // Try to get width and height from attributes
+      const width = Number.parseInt(img.getAttribute("width") || "0", 10) || undefined
+      const height = Number.parseInt(img.getAttribute("height") || "0", 10) || undefined
+
       extractedImages.push({
         url: imgUrl,
         filename,
         selected: true,
         sourceUrl: pageUrl,
+        width,
+        height,
       })
     })
 
@@ -168,18 +216,26 @@ export default function ImageDownloader() {
     if (
       visitedUrls.has(pageUrl) ||
       depth > crawlSettings.maxDepth ||
-      currentStats.pagesVisited >= crawlSettings.maxPages
+      currentStats.pagesVisited >= crawlSettings.maxPages ||
+      !loadingRef.current
     ) {
       return
     }
 
     try {
       setStatus(`Crawling page: ${pageUrl} (Depth: ${depth})`)
+      addLog(`Crawling page at depth ${depth}`, "info", pageUrl)
 
       // Add to visited URLs
       const updatedVisited = new Set(visitedUrls)
       updatedVisited.add(pageUrl)
       setVisitedUrls(updatedVisited)
+
+      // Update recently visited pages
+      setRecentlyVisitedPages((prev) => {
+        const newPages = [pageUrl, ...prev.slice(0, 4)]
+        return newPages
+      })
 
       // Update stats
       setCurrentStats((prev) => ({
@@ -191,18 +247,22 @@ export default function ImageDownloader() {
       // Update progress
       setProgress((currentStats.pagesVisited / crawlSettings.maxPages) * 100)
 
-      // Use our server-side proxy instead of a third-party CORS proxy
+      // Use our server-side proxy
       const response = await fetch(`/api/proxy?url=${encodeURIComponent(pageUrl)}`)
 
       if (!response.ok) {
-        console.error(`Failed to fetch ${pageUrl}: ${response.statusText}`)
+        const errorMsg = `Failed to fetch ${pageUrl}: ${response.statusText}`
+        console.error(errorMsg)
+        addLog(errorMsg, "error", pageUrl)
         return
       }
 
       const html = await response.text()
+      addLog(`Successfully fetched page content`, "success", pageUrl)
 
       // Extract images
       const newImages = extractImagesFromHtml(html, pageUrl)
+      addLog(`Found ${newImages.length} images on page`, "info", pageUrl)
 
       // Update images state
       setImages((prevImages) => {
@@ -215,58 +275,118 @@ export default function ImageDownloader() {
           imagesFound: prev.imagesFound + uniqueNewImages.length,
         }))
 
+        if (uniqueNewImages.length > 0) {
+          addLog(`Added ${uniqueNewImages.length} new unique images`, "success")
+        }
+
         return [...prevImages, ...uniqueNewImages]
       })
 
       // If we're at max depth, don't extract more links
       if (depth >= crawlSettings.maxDepth) {
+        addLog(`Reached maximum depth (${depth}), not extracting more links`, "info", pageUrl)
         return
       }
 
       // Extract links for next level
       const links = extractLinks(html, pageUrl)
+      addLog(`Found ${links.length} links on page`, "info", pageUrl)
 
       // Add new links to queue
       setUrlQueue((prev) => {
         const newLinks = links.filter((link) => !visitedUrls.has(link) && !prev.includes(link))
+        if (newLinks.length > 0) {
+          addLog(`Added ${newLinks.length} new links to the queue`, "info")
+        }
         return [...prev, ...newLinks]
       })
 
       // Wait before next request to avoid overwhelming the server
       await delay(crawlSettings.delayBetweenRequests)
     } catch (err) {
-      console.error(`Error crawling ${pageUrl}:`, err)
+      const errorMsg = `Error crawling ${pageUrl}: ${err instanceof Error ? err.message : String(err)}`
+      console.error(errorMsg)
+      addLog(errorMsg, "error", pageUrl)
     }
   }
 
   const processQueue = async () => {
-    if (urlQueue.length === 0 || !loading) {
+    // Clear any existing timeout
+    if (queueProcessorTimeoutRef.current) {
+      clearTimeout(queueProcessorTimeoutRef.current)
+      queueProcessorTimeoutRef.current = null
+    }
+
+    // If we're already processing, not loading, or the queue is empty, don't continue
+    if (isProcessingRef.current || !loadingRef.current || urlQueue.length === 0) {
       return
     }
 
-    const nextUrl = urlQueue[0]
-    const newQueue = urlQueue.slice(1)
-    setUrlQueue(newQueue)
+    try {
+      isProcessingRef.current = true
 
-    // Calculate current depth based on the starting URL
-    const baseUrlObj = new URL(url)
-    const nextUrlObj = new URL(nextUrl)
+      // Get the next URL from the queue
+      const nextUrl = urlQueue[0]
 
-    // Simple depth calculation - count additional path segments
-    const basePath = baseUrlObj.pathname.split("/").filter(Boolean)
-    const nextPath = nextUrlObj.pathname.split("/").filter(Boolean)
-    const depth = nextPath.length - basePath.length + 1
+      // Update the queue state
+      setUrlQueue((prev) => prev.slice(1))
 
-    await crawlPage(nextUrl, Math.max(1, depth))
+      // Calculate current depth based on the starting URL
+      const baseUrlObj = new URL(url)
+      const nextUrlObj = new URL(nextUrl)
 
-    // Continue processing queue
-    if (newQueue.length > 0 && currentStats.pagesVisited < crawlSettings.maxPages) {
-      processQueue()
-    } else {
-      setLoading(false)
-      setStatus(`Crawling complete. Found ${images.length} images from ${currentStats.pagesVisited} pages.`)
+      // Simple depth calculation - count additional path segments
+      const basePath = baseUrlObj.pathname.split("/").filter(Boolean)
+      const nextPath = nextUrlObj.pathname.split("/").filter(Boolean)
+      const depth = Math.max(1, nextPath.length - basePath.length + 1)
+
+      // Process the URL
+      await crawlPage(nextUrl, depth)
+
+      // Schedule the next queue processing
+      queueProcessorTimeoutRef.current = setTimeout(() => {
+        isProcessingRef.current = false
+        processQueue()
+      }, 100)
+    } catch (error) {
+      console.error("Error in queue processing:", error)
+      addLog(`Queue processing error: ${error instanceof Error ? error.message : String(error)}`, "error")
+      isProcessingRef.current = false
+
+      // Try to continue processing after an error
+      queueProcessorTimeoutRef.current = setTimeout(processQueue, 1000)
     }
   }
+
+  // Effect to monitor the queue and start processing when needed
+  useEffect(() => {
+    if (loading && urlQueue.length > 0 && !isProcessingRef.current) {
+      processQueue()
+    }
+
+    // Cleanup function to clear any timeouts
+    return () => {
+      if (queueProcessorTimeoutRef.current) {
+        clearTimeout(queueProcessorTimeoutRef.current)
+      }
+    }
+  }, [loading, urlQueue.length])
+
+  // Effect to check if crawling is complete
+  useEffect(() => {
+    if (loading && urlQueue.length === 0 && !isProcessingRef.current) {
+      // If the queue is empty and we're not processing anything, we're done
+      const timeoutId = setTimeout(() => {
+        if (urlQueue.length === 0) {
+          setLoading(false)
+          setStatus(`Crawling complete. Found ${images.length} images from ${currentStats.pagesVisited} pages.`)
+          addLog(`Crawling complete. Found ${images.length} images from ${currentStats.pagesVisited} pages.`, "success")
+        }
+      }, 2000) // Wait a bit to make sure no new URLs are being added
+
+      return () => clearTimeout(timeoutId)
+    }
+  }, [loading, urlQueue.length, isProcessingRef.current, images.length, currentStats.pagesVisited])
 
   const startCrawling = async () => {
     if (!url) {
@@ -292,22 +412,32 @@ export default function ImageDownloader() {
         imagesFound: 0,
         currentDepth: 0,
       })
+      setCrawlLogs([])
+      setRecentlyVisitedPages([])
+      isProcessingRef.current = false
 
-      // Start with the first URL
-      await crawlPage(url, 1)
+      addLog(`Starting crawl from ${url}`, "info", url)
 
-      // Process the queue
-      processQueue()
+      // The queue processing will be handled by the useEffect
     } catch (err) {
       setError(`Error: ${err instanceof Error ? err.message : String(err)}`)
       setLoading(false)
+      addLog(`Error starting crawl: ${err instanceof Error ? err.message : String(err)}`, "error")
     }
   }
 
   const stopCrawling = () => {
     setLoading(false)
     setUrlQueue([])
-    setStatus(`Crawling stopped. Found ${images.length} images from ${currentStats.pagesVisited} pages.`)
+    const message = `Crawling stopped. Found ${images.length} images from ${currentStats.pagesVisited} pages.`
+    setStatus(message)
+    addLog(message, "info")
+
+    // Clear any timeouts
+    if (queueProcessorTimeoutRef.current) {
+      clearTimeout(queueProcessorTimeoutRef.current)
+      queueProcessorTimeoutRef.current = null
+    }
   }
 
   const toggleSelectAll = (select: boolean) => {
@@ -331,6 +461,7 @@ export default function ImageDownloader() {
     try {
       setLoading(true)
       setStatus("Preparing download...")
+      addLog(`Preparing to download ${selectedImages.length} images`, "info")
 
       if (selectedImages.length === 1) {
         // Download single image using our server-side proxy
@@ -339,9 +470,11 @@ export default function ImageDownloader() {
         link.href = proxyUrl
         link.download = selectedImages[0].filename
         link.click()
+        addLog(`Downloaded single image: ${selectedImages[0].filename}`, "success")
       } else {
         // Create a zip file for multiple images
         setStatus("Creating zip file...")
+        addLog(`Creating zip file for ${selectedImages.length} images`, "info")
         const zip = new JSZip()
 
         // Add each image to the zip using our server-side proxy
@@ -349,27 +482,36 @@ export default function ImageDownloader() {
           try {
             const proxyUrl = `/api/image-proxy?url=${encodeURIComponent(img.url)}`
             const response = await fetch(proxyUrl)
-            if (!response.ok) throw new Error(`Failed to fetch ${img.url}`)
+            if (!response.ok) {
+              addLog(`Failed to fetch image: ${img.url}`, "error")
+              throw new Error(`Failed to fetch ${img.url}`)
+            }
 
             const blob = await response.blob()
             zip.file(img.filename, blob)
 
             setStatus(`Adding image ${index + 1}/${selectedImages.length}...`)
+            addLog(`Added image ${index + 1}/${selectedImages.length} to zip`, "info")
           } catch (err) {
             console.error(`Error downloading ${img.url}:`, err)
+            addLog(`Error downloading ${img.url}: ${err instanceof Error ? err.message : String(err)}`, "error")
           }
         })
 
         await Promise.all(fetchPromises)
 
         setStatus("Generating zip file...")
+        addLog(`Generating zip file`, "info")
         const content = await zip.generateAsync({ type: "blob" })
         saveAs(content, "website-images.zip")
+        addLog(`Zip file generated and download started`, "success")
       }
 
       setStatus(`Downloaded ${selectedImages.length} images`)
     } catch (err) {
-      setError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      const errorMsg = `Error: ${err instanceof Error ? err.message : String(err)}`
+      setError(errorMsg)
+      addLog(errorMsg, "error")
     } finally {
       setLoading(false)
     }
@@ -402,6 +544,7 @@ export default function ImageDownloader() {
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Crawler Settings</DialogTitle>
+              <DialogDescription>Configure how the crawler will navigate through the website</DialogDescription>
             </DialogHeader>
             <div className="space-y-4 py-4">
               <div className="space-y-2">
@@ -461,7 +604,12 @@ export default function ImageDownloader() {
         )}
       </div>
 
-      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4">{error}</div>}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 flex items-start">
+          <AlertCircle className="h-5 w-5 mr-2 mt-0.5 flex-shrink-0" />
+          <div>{error}</div>
+        </div>
+      )}
 
       {status && <div className="bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded mb-4">{status}</div>}
 
@@ -481,77 +629,142 @@ export default function ImageDownloader() {
               Depth: {currentStats.currentDepth}/{crawlSettings.maxDepth}
             </span>
           </div>
+
+          {recentlyVisitedPages.length > 0 && (
+            <div className="mt-4">
+              <h3 className="text-sm font-medium mb-2">Recently Visited Pages:</h3>
+              <div className="flex flex-wrap gap-2">
+                {recentlyVisitedPages.map((page, index) => (
+                  <TooltipProvider key={index}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge variant="outline" className="text-xs truncate max-w-[200px]">
+                          {new URL(page).pathname || "/"}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="text-xs">{page}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-4">
+            <h3 className="text-sm font-medium mb-2">Queue Status:</h3>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary">{urlQueue.length} URLs in queue</Badge>
+              {isProcessingRef.current && <Badge variant="outline">Processing...</Badge>}
+            </div>
+          </div>
         </div>
       )}
 
-      {images.length > 0 && (
-        <>
-          <div className="flex justify-between items-center mb-4">
-            <div>
-              <span className="font-medium">{images.length} images found</span>
-              <span className="text-gray-500 ml-2">({images.filter((img) => img.selected).length} selected)</span>
-            </div>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => toggleSelectAll(true)} disabled={loading}>
-                Select All
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => toggleSelectAll(false)} disabled={loading}>
-                Deselect All
-              </Button>
-              <Button
-                onClick={downloadSelected}
-                disabled={loading || images.filter((img) => img.selected).length === 0}
-                size="sm"
-              >
-                <Download className="mr-2 h-4 w-4" />
-                Download Selected
-              </Button>
-            </div>
-          </div>
+      <Tabs defaultValue="images" className="mb-6">
+        <TabsList>
+          <TabsTrigger value="images">Images ({images.length})</TabsTrigger>
+          <TabsTrigger value="logs">Activity Log ({crawlLogs.length})</TabsTrigger>
+        </TabsList>
+        <TabsContent value="images">
+          {images.length > 0 && (
+            <>
+              <div className="flex justify-between items-center mb-4">
+                <div>
+                  <span className="font-medium">{images.length} images found</span>
+                  <span className="text-gray-500 ml-2">({images.filter((img) => img.selected).length} selected)</span>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => toggleSelectAll(true)} disabled={loading}>
+                    Select All
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => toggleSelectAll(false)} disabled={loading}>
+                    Deselect All
+                  </Button>
+                  <Button
+                    onClick={downloadSelected}
+                    disabled={loading || images.filter((img) => img.selected).length === 0}
+                    size="sm"
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    Download Selected
+                  </Button>
+                </div>
+              </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-            {images.map((image, index) => (
-              <Card key={index} className={`overflow-hidden ${image.selected ? "ring-2 ring-blue-500" : ""}`}>
-                <div className="aspect-square relative bg-gray-100 flex items-center justify-center">
-                  <img
-                    src={getProxiedImageUrl(image.url) || "/placeholder.svg"}
-                    alt={image.filename}
-                    className="max-h-full max-w-full object-contain"
-                    onError={(e) => {
-                      ;(e.target as HTMLImageElement).src = "/abstract-geometric-shapes.png"
-                    }}
-                  />
-                </div>
-                <div className="p-2">
-                  <div className="text-xs text-gray-500 truncate" title={image.filename}>
-                    {image.filename}
-                  </div>
-                  <div className="text-xs text-gray-400 truncate mt-1" title={image.sourceUrl}>
-                    From: {image.sourceUrl}
-                  </div>
-                  <div className="flex justify-between items-center mt-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 w-8 p-0"
-                      onClick={() => window.open(getProxiedImageUrl(image.url), "_blank")}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {images.map((image, index) => (
+                  <Card key={index} className={`overflow-hidden ${image.selected ? "ring-2 ring-blue-500" : ""}`}>
+                    <div className="aspect-square relative bg-gray-100 flex items-center justify-center">
+                      <img
+                        src={getProxiedImageUrl(image.url) || "/placeholder.svg"}
+                        alt={image.filename}
+                        className="max-h-full max-w-full object-contain"
+                        onError={(e) => {
+                          ;(e.target as HTMLImageElement).src = "/abstract-geometric-shapes.png"
+                        }}
+                      />
+                    </div>
+                    <div className="p-2">
+                      <div className="text-xs text-gray-500 truncate" title={image.filename}>
+                        {image.filename}
+                      </div>
+                      <div className="text-xs text-gray-400 truncate mt-1" title={image.sourceUrl}>
+                        From: {image.sourceUrl}
+                      </div>
+                      <div className="flex justify-between items-center mt-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0"
+                          onClick={() => window.open(getProxiedImageUrl(image.url), "_blank")}
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          <span className="sr-only">Open image</span>
+                        </Button>
+                        <input
+                          type="checkbox"
+                          checked={image.selected}
+                          onChange={() => toggleSelect(index)}
+                          className="h-4 w-4"
+                        />
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            </>
+          )}
+        </TabsContent>
+        <TabsContent value="logs">
+          <ScrollArea className="h-[300px] border rounded-md p-4">
+            {crawlLogs.length === 0 ? (
+              <div className="text-center text-gray-500 py-8">No activity logs yet</div>
+            ) : (
+              <div className="space-y-2">
+                {crawlLogs.map((log, index) => (
+                  <div key={index} className="text-sm flex items-start gap-2">
+                    <span className="text-gray-500 whitespace-nowrap">{log.timestamp.toLocaleTimeString()}</span>
+                    {log.type === "error" && <AlertCircle className="h-4 w-4 text-red-500 mt-0.5 flex-shrink-0" />}
+                    {log.type === "success" && <CheckCircle2 className="h-4 w-4 text-green-500 mt-0.5 flex-shrink-0" />}
+                    <span
+                      className={log.type === "error" ? "text-red-600" : log.type === "success" ? "text-green-600" : ""}
                     >
-                      <ExternalLink className="h-4 w-4" />
-                      <span className="sr-only">Open image</span>
-                    </Button>
-                    <input
-                      type="checkbox"
-                      checked={image.selected}
-                      onChange={() => toggleSelect(index)}
-                      className="h-4 w-4"
-                    />
+                      {log.message}
+                    </span>
+                    {log.url && (
+                      <span className="text-xs text-gray-500 truncate max-w-[200px]">
+                        ({new URL(log.url).pathname || "/"})
+                      </span>
+                    )}
                   </div>
-                </div>
-              </Card>
-            ))}
-          </div>
-        </>
-      )}
+                ))}
+              </div>
+            )}
+          </ScrollArea>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }
