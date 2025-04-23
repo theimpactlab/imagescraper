@@ -191,9 +191,8 @@ export default function ImageDownloader() {
       // Update progress
       setProgress((currentStats.pagesVisited / crawlSettings.maxPages) * 100)
 
-      // Use a CORS proxy to bypass CORS restrictions
-      const corsProxy = "https://corsproxy.io/?"
-      const response = await fetch(`${corsProxy}${encodeURIComponent(pageUrl)}`)
+      // Use our server-side proxy instead of a third-party CORS proxy
+      const response = await fetch(`/api/proxy?url=${encodeURIComponent(pageUrl)}`)
 
       if (!response.ok) {
         console.error(`Failed to fetch ${pageUrl}: ${response.statusText}`)
@@ -334,9 +333,10 @@ export default function ImageDownloader() {
       setStatus("Preparing download...")
 
       if (selectedImages.length === 1) {
-        // Download single image directly
+        // Download single image using our server-side proxy
+        const proxyUrl = `/api/image-proxy?url=${encodeURIComponent(selectedImages[0].url)}`
         const link = document.createElement("a")
-        link.href = selectedImages[0].url
+        link.href = proxyUrl
         link.download = selectedImages[0].filename
         link.click()
       } else {
@@ -344,10 +344,11 @@ export default function ImageDownloader() {
         setStatus("Creating zip file...")
         const zip = new JSZip()
 
-        // Add each image to the zip
+        // Add each image to the zip using our server-side proxy
         const fetchPromises = selectedImages.map(async (img, index) => {
           try {
-            const response = await fetch(img.url)
+            const proxyUrl = `/api/image-proxy?url=${encodeURIComponent(img.url)}`
+            const response = await fetch(proxyUrl)
             if (!response.ok) throw new Error(`Failed to fetch ${img.url}`)
 
             const blob = await response.blob()
@@ -372,6 +373,11 @@ export default function ImageDownloader() {
     } finally {
       setLoading(false)
     }
+  }
+
+  // Function to get proxied image URL for display
+  const getProxiedImageUrl = (originalUrl: string) => {
+    return `/api/image-proxy?url=${encodeURIComponent(originalUrl)}`
   }
 
   return (
@@ -508,7 +514,7 @@ export default function ImageDownloader() {
               <Card key={index} className={`overflow-hidden ${image.selected ? "ring-2 ring-blue-500" : ""}`}>
                 <div className="aspect-square relative bg-gray-100 flex items-center justify-center">
                   <img
-                    src={image.url || "/placeholder.svg"}
+                    src={getProxiedImageUrl(image.url) || "/placeholder.svg"}
                     alt={image.filename}
                     className="max-h-full max-w-full object-contain"
                     onError={(e) => {
@@ -528,7 +534,7 @@ export default function ImageDownloader() {
                       variant="ghost"
                       size="sm"
                       className="h-8 w-8 p-0"
-                      onClick={() => window.open(image.url, "_blank")}
+                      onClick={() => window.open(getProxiedImageUrl(image.url), "_blank")}
                     >
                       <ExternalLink className="h-4 w-4" />
                       <span className="sr-only">Open image</span>
