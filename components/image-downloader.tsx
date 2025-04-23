@@ -58,12 +58,12 @@ export default function ImageDownloader() {
   const [visitedUrls, setVisitedUrls] = useState<Set<string>>(new Set())
   const [urlQueue, setUrlQueue] = useState<string[]>([])
   const [crawlSettings, setCrawlSettings] = useState<CrawlSettings>({
-    maxDepth: 2,
-    maxPages: 20,
+    maxDepth: 5,
+    maxPages: 100,
     includeExternalDomains: false,
     delayBetweenRequests: 1000,
     includeSvgImages: false,
-    maxRetries: 2,
+    maxRetries: 1,
   })
   const [currentStats, setCurrentStats] = useState({
     pagesVisited: 0,
@@ -814,7 +814,7 @@ export default function ImageDownloader() {
                 <Slider
                   value={[crawlSettings.maxDepth]}
                   min={1}
-                  max={5}
+                  max={10}
                   step={1}
                   onValueChange={(value) => setCrawlSettings({ ...crawlSettings, maxDepth: value[0] })}
                 />
@@ -825,9 +825,9 @@ export default function ImageDownloader() {
                 <Label>Maximum Pages: {crawlSettings.maxPages}</Label>
                 <Slider
                   value={[crawlSettings.maxPages]}
-                  min={5}
-                  max={100}
-                  step={5}
+                  min={10}
+                  max={500}
+                  step={10}
                   onValueChange={(value) => setCrawlSettings({ ...crawlSettings, maxPages: value[0] })}
                 />
                 <p className="text-xs text-gray-500">Maximum number of pages to visit</p>
