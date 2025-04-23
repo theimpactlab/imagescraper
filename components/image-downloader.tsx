@@ -44,7 +44,7 @@ interface CrawlSettings {
 interface CrawlLog {
   timestamp: Date
   message: string
-  type: "info" | "error" | "success"
+  type: "info" | "error" | "success" | "warning"
   url?: string
 }
 
@@ -75,14 +75,26 @@ export default function ImageDownloader() {
   const isProcessingRef = useRef(false)
   const loadingRef = useRef(false)
   const queueProcessorTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const pagesVisitedRef = useRef(0)
+  const maxPagesRef = useRef(crawlSettings.maxPages)
 
-  // Update the ref when loading state changes
+  // Update the refs when state changes
   useEffect(() => {
     loadingRef.current = loading
+
+    // If we're not loading, reset the pages visited counter
+    if (!loading) {
+      pagesVisitedRef.current = 0
+    }
   }, [loading])
 
+  // Update maxPages ref when settings change
+  useEffect(() => {
+    maxPagesRef.current = crawlSettings.maxPages
+  }, [crawlSettings.maxPages])
+
   // Add a log entry
-  const addLog = (message: string, type: "info" | "error" | "success", url?: string) => {
+  const addLog = (message: string, type: "info" | "error" | "success" | "warning", url?: string) => {
     setCrawlLogs((prev) => [
       { timestamp: new Date(), message, type, url },
       ...prev.slice(0, 99), // Keep only the last 100 logs
@@ -213,16 +225,22 @@ export default function ImageDownloader() {
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
   const crawlPage = async (pageUrl: string, depth: number): Promise<void> => {
-    if (
-      visitedUrls.has(pageUrl) ||
-      depth > crawlSettings.maxDepth ||
-      currentStats.pagesVisited >= crawlSettings.maxPages ||
-      !loadingRef.current
-    ) {
+    // Check if we've reached the maximum number of pages
+    if (pagesVisitedRef.current >= maxPagesRef.current) {
+      addLog(`Maximum page limit (${maxPagesRef.current}) reached. Stopping crawl.`, "warning")
+      setLoading(false)
+      return
+    }
+
+    // Check other conditions
+    if (visitedUrls.has(pageUrl) || depth > crawlSettings.maxDepth || !loadingRef.current) {
       return
     }
 
     try {
+      // Increment the pages visited counter
+      pagesVisitedRef.current += 1
+
       setStatus(`Crawling page: ${pageUrl} (Depth: ${depth})`)
       addLog(`Crawling page at depth ${depth}`, "info", pageUrl)
 
@@ -240,12 +258,12 @@ export default function ImageDownloader() {
       // Update stats
       setCurrentStats((prev) => ({
         ...prev,
-        pagesVisited: prev.pagesVisited + 1,
+        pagesVisited: pagesVisitedRef.current,
         currentDepth: Math.max(prev.currentDepth, depth),
       }))
 
       // Update progress
-      setProgress((currentStats.pagesVisited / crawlSettings.maxPages) * 100)
+      setProgress((pagesVisitedRef.current / maxPagesRef.current) * 100)
 
       // Use our server-side proxy
       const response = await fetch(`/api/proxy?url=${encodeURIComponent(pageUrl)}`)
@@ -288,12 +306,23 @@ export default function ImageDownloader() {
         return
       }
 
+      // Check if we've reached the maximum number of pages again
+      if (pagesVisitedRef.current >= maxPagesRef.current) {
+        addLog(`Maximum page limit (${maxPagesRef.current}) reached. Not adding more links.`, "warning")
+        return
+      }
+
       // Extract links for next level
       const links = extractLinks(html, pageUrl)
       addLog(`Found ${links.length} links on page`, "info", pageUrl)
 
-      // Add new links to queue
+      // Add new links to queue, but only if we haven't reached the max pages
       setUrlQueue((prev) => {
+        // If we've already reached the max pages, don't add more links
+        if (pagesVisitedRef.current >= maxPagesRef.current) {
+          return prev
+        }
+
         const newLinks = links.filter((link) => !visitedUrls.has(link) && !prev.includes(link))
         if (newLinks.length > 0) {
           addLog(`Added ${newLinks.length} new links to the queue`, "info")
@@ -315,6 +344,13 @@ export default function ImageDownloader() {
     if (queueProcessorTimeoutRef.current) {
       clearTimeout(queueProcessorTimeoutRef.current)
       queueProcessorTimeoutRef.current = null
+    }
+
+    // Check if we've reached the maximum number of pages
+    if (pagesVisitedRef.current >= maxPagesRef.current) {
+      addLog(`Maximum page limit (${maxPagesRef.current}) reached. Stopping crawl.`, "warning")
+      setLoading(false)
+      return
     }
 
     // If we're already processing, not loading, or the queue is empty, don't continue
@@ -379,14 +415,17 @@ export default function ImageDownloader() {
       const timeoutId = setTimeout(() => {
         if (urlQueue.length === 0) {
           setLoading(false)
-          setStatus(`Crawling complete. Found ${images.length} images from ${currentStats.pagesVisited} pages.`)
-          addLog(`Crawling complete. Found ${images.length} images from ${currentStats.pagesVisited} pages.`, "success")
+          setStatus(`Crawling complete. Found ${images.length} images from ${pagesVisitedRef.current} pages.`)
+          addLog(
+            `Crawling complete. Found ${images.length} images from ${images.length} images from ${pagesVisitedRef.current} pages.`,
+            "success",
+          )
         }
       }, 2000) // Wait a bit to make sure no new URLs are being added
 
       return () => clearTimeout(timeoutId)
     }
-  }, [loading, urlQueue.length, isProcessingRef.current, images.length, currentStats.pagesVisited])
+  }, [loading, urlQueue.length, isProcessingRef.current, images.length])
 
   const startCrawling = async () => {
     if (!url) {
@@ -400,6 +439,7 @@ export default function ImageDownloader() {
     }
 
     try {
+      // Reset all state
       setLoading(true)
       setError("")
       setStatus("Starting crawl...")
@@ -414,9 +454,14 @@ export default function ImageDownloader() {
       })
       setCrawlLogs([])
       setRecentlyVisitedPages([])
+
+      // Reset refs
       isProcessingRef.current = false
+      pagesVisitedRef.current = 0
+      maxPagesRef.current = crawlSettings.maxPages
 
       addLog(`Starting crawl from ${url}`, "info", url)
+      addLog(`Maximum pages set to ${maxPagesRef.current}`, "info")
 
       // The queue processing will be handled by the useEffect
     } catch (err) {
@@ -429,7 +474,7 @@ export default function ImageDownloader() {
   const stopCrawling = () => {
     setLoading(false)
     setUrlQueue([])
-    const message = `Crawling stopped. Found ${images.length} images from ${currentStats.pagesVisited} pages.`
+    const message = `Crawling stopped. Found ${images.length} images from ${pagesVisitedRef.current} pages.`
     setStatus(message)
     addLog(message, "info")
 
@@ -619,10 +664,10 @@ export default function ImageDownloader() {
             <span>Crawling Progress</span>
             <span>{Math.min(100, Math.round(progress))}%</span>
           </div>
-          <Progress value={progress} className="h-2" />
+          <Progress value={Math.min(100, progress)} className="h-2" />
           <div className="flex justify-between text-sm text-gray-500 mt-2">
             <span>
-              Pages: {currentStats.pagesVisited}/{crawlSettings.maxPages}
+              Pages: {pagesVisitedRef.current}/{maxPagesRef.current}
             </span>
             <span>Images: {currentStats.imagesFound}</span>
             <span>
@@ -748,8 +793,17 @@ export default function ImageDownloader() {
                     <span className="text-gray-500 whitespace-nowrap">{log.timestamp.toLocaleTimeString()}</span>
                     {log.type === "error" && <AlertCircle className="h-4 w-4 text-red-500 mt-0.5 flex-shrink-0" />}
                     {log.type === "success" && <CheckCircle2 className="h-4 w-4 text-green-500 mt-0.5 flex-shrink-0" />}
+                    {log.type === "warning" && <AlertCircle className="h-4 w-4 text-amber-500 mt-0.5 flex-shrink-0" />}
                     <span
-                      className={log.type === "error" ? "text-red-600" : log.type === "success" ? "text-green-600" : ""}
+                      className={
+                        log.type === "error"
+                          ? "text-red-600"
+                          : log.type === "success"
+                            ? "text-green-600"
+                            : log.type === "warning"
+                              ? "text-amber-600"
+                              : ""
+                      }
                     >
                       {log.message}
                     </span>
