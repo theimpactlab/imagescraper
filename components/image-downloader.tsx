@@ -6,7 +6,7 @@ import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
-import { Download, ExternalLink, Settings, AlertCircle, CheckCircle2 } from "lucide-react"
+import { Download, ExternalLink, Settings, AlertCircle, CheckCircle2, Filter } from "lucide-react"
 import JSZip from "jszip"
 import { saveAs } from "file-saver"
 import { Slider } from "@/components/ui/slider"
@@ -27,6 +27,7 @@ interface ImageItem {
   width?: number
   height?: number
   size?: number
+  type?: string
 }
 
 interface CrawlSettings {
@@ -34,6 +35,7 @@ interface CrawlSettings {
   maxPages: number
   includeExternalDomains: boolean
   delayBetweenRequests: number
+  includeSvgImages: boolean
 }
 
 interface CrawlLog {
@@ -57,6 +59,7 @@ export default function ImageDownloader() {
     maxPages: 20,
     includeExternalDomains: false,
     delayBetweenRequests: 1000,
+    includeSvgImages: false,
   })
   const [currentStats, setCurrentStats] = useState({
     pagesVisited: 0,
@@ -65,6 +68,7 @@ export default function ImageDownloader() {
   })
   const [crawlLogs, setCrawlLogs] = useState<CrawlLog[]>([])
   const [recentlyVisitedPages, setRecentlyVisitedPages] = useState<string[]>([])
+  const [failedImages, setFailedImages] = useState<Set<string>>(new Set())
 
   // Refs for tracking the crawling state
   const isProcessingRef = useRef(false)
@@ -156,6 +160,21 @@ export default function ImageDownloader() {
     }
   }
 
+  const getImageType = (url: string): string => {
+    try {
+      const pathname = new URL(url).pathname.toLowerCase()
+      if (pathname.endsWith(".jpg") || pathname.endsWith(".jpeg")) return "jpeg"
+      if (pathname.endsWith(".png")) return "png"
+      if (pathname.endsWith(".gif")) return "gif"
+      if (pathname.endsWith(".svg")) return "svg"
+      if (pathname.endsWith(".webp")) return "webp"
+      if (pathname.endsWith(".avif")) return "avif"
+      return "unknown"
+    } catch (e) {
+      return "unknown"
+    }
+  }
+
   const extractLinks = (html: string, baseUrl: string): string[] => {
     const parser = new DOMParser()
     const doc = parser.parseFromString(html, "text/html")
@@ -219,6 +238,14 @@ export default function ImageDownloader() {
 
       if (!imgUrl) return
 
+      // Get image type
+      const type = getImageType(imgUrl)
+
+      // Skip SVG images if not included in settings
+      if (type === "svg" && !crawlSettings.includeSvgImages) {
+        return
+      }
+
       // Extract filename from URL
       const urlParts = imgUrl.split("/")
       let filename = urlParts[urlParts.length - 1].split("?")[0]
@@ -239,6 +266,7 @@ export default function ImageDownloader() {
         sourceUrl: pageUrl,
         width,
         height,
+        type,
       })
     })
 
@@ -532,6 +560,7 @@ export default function ImageDownloader() {
       setError("")
       setStatus("Starting crawl...")
       setImages([])
+      setFailedImages(new Set())
 
       // Reset refs
       isProcessingRef.current = false
@@ -673,6 +702,22 @@ export default function ImageDownloader() {
     }
   }
 
+  // Handle image load error
+  const handleImageError = (url: string) => {
+    console.error(`Failed to load image: ${url}`)
+    setFailedImages((prev) => {
+      const updated = new Set(prev)
+      updated.add(url)
+      return updated
+    })
+  }
+
+  // Filter images by type
+  const filterImagesByType = (type: string | null) => {
+    if (!type) return images
+    return images.filter((img) => img.type === type)
+  }
+
   return (
     <div className="max-w-4xl mx-auto">
       <div className="flex gap-2 mb-6">
@@ -742,6 +787,17 @@ export default function ImageDownloader() {
                 <Label>Include External Domains</Label>
               </div>
               <p className="text-xs text-gray-500">Follow links to other domains (may increase crawl time)</p>
+
+              <div className="flex items-center space-x-2">
+                <Switch
+                  checked={crawlSettings.includeSvgImages}
+                  onCheckedChange={(checked) => setCrawlSettings({ ...crawlSettings, includeSvgImages: checked })}
+                />
+                <Label>Include SVG Images</Label>
+              </div>
+              <p className="text-xs text-gray-500">
+                Include SVG vector graphics in results (may cause errors with some sites)
+              </p>
             </div>
           </DialogContent>
         </Dialog>
@@ -827,6 +883,25 @@ export default function ImageDownloader() {
                   <span className="text-gray-500 ml-2">({images.filter((img) => img.selected).length} selected)</span>
                 </div>
                 <div className="flex gap-2">
+                  <div className="flex items-center gap-2 mr-4">
+                    <Button variant="outline" size="sm" className="flex items-center gap-1">
+                      <Filter className="h-4 w-4" />
+                      <select
+                        className="bg-transparent border-none focus:outline-none text-sm"
+                        onChange={(e) => {
+                          const value = e.target.value === "all" ? null : e.target.value
+                          setImages(filterImagesByType(value))
+                        }}
+                      >
+                        <option value="all">All Types</option>
+                        <option value="jpeg">JPEG</option>
+                        <option value="png">PNG</option>
+                        <option value="gif">GIF</option>
+                        <option value="svg">SVG</option>
+                        <option value="webp">WebP</option>
+                      </select>
+                    </Button>
+                  </div>
                   <Button variant="outline" size="sm" onClick={() => toggleSelectAll(true)} disabled={loading}>
                     Select All
                   </Button>
@@ -853,12 +928,16 @@ export default function ImageDownloader() {
                         alt={image.filename}
                         className="max-h-full max-w-full object-contain"
                         onError={(e) => {
-                          console.error(`Failed to load image: ${image.url}`)
+                          handleImageError(image.url)
                           ;(e.target as HTMLImageElement).src = "/abstract-geometric-shapes.png"
-                          // Add a data attribute to mark this image as failed
                           ;(e.target as HTMLImageElement).dataset.loadFailed = "true"
                         }}
                       />
+                      {image.type && (
+                        <Badge variant="secondary" className="absolute top-2 right-2 text-xs">
+                          {image.type.toUpperCase()}
+                        </Badge>
+                      )}
                     </div>
                     <div className="p-2">
                       <div className="text-xs text-gray-500 truncate" title={image.filename}>

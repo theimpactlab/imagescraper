@@ -16,6 +16,9 @@ export async function GET(request: NextRequest) {
     // Log the URL being fetched (for debugging)
     console.log(`Fetching image from: ${parsedUrl.toString()}`)
 
+    // Check if it's an SVG file based on extension
+    const isSvg = parsedUrl.pathname.toLowerCase().endsWith(".svg")
+
     // Fetch the image with improved error handling and timeout
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 15000) // 15 second timeout
@@ -24,7 +27,7 @@ export async function GET(request: NextRequest) {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        Accept: "image/*,*/*;q=0.8",
+        Accept: isSvg ? "image/svg+xml,*/*;q=0.8" : "image/*,*/*;q=0.8",
         Referer: parsedUrl.origin,
       },
       redirect: "follow",
@@ -42,14 +45,26 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Check if the content type is an image
+    // Get the content type
     const contentType = response.headers.get("Content-Type") || ""
-    if (!contentType.startsWith("image/")) {
-      console.warn(`Resource is not an image: ${contentType}`)
-      // We'll still try to return it, but log a warning
+
+    // Special handling for SVG files
+    if (isSvg || contentType.includes("svg")) {
+      const text = await response.text()
+
+      // Return the SVG with appropriate headers
+      return new NextResponse(text, {
+        status: 200,
+        headers: {
+          "Content-Type": "image/svg+xml",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=86400",
+          "X-Proxy-Original-Url": url,
+        },
+      })
     }
 
-    // Get the response body as an array buffer
+    // For other image types, get the response body as an array buffer
     const arrayBuffer = await response.arrayBuffer()
 
     // Return the image with appropriate headers
