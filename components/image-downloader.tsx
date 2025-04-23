@@ -1,5 +1,7 @@
 "use client"
 
+import { DialogTrigger } from "@/components/ui/dialog"
+
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -8,14 +10,7 @@ import { Download, ExternalLink, Settings, AlertCircle, CheckCircle2 } from "luc
 import JSZip from "jszip"
 import { saveAs } from "file-saver"
 import { Slider } from "@/components/ui/slider"
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-  DialogDescription,
-} from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Progress } from "@/components/ui/progress"
@@ -114,17 +109,21 @@ export default function ImageDownloader() {
     try {
       // Handle absolute URLs
       if (inputUrl.startsWith("http")) {
-        return new URL(inputUrl).href
+        const url = new URL(inputUrl)
+        // Remove trailing slashes for consistency
+        return url.href.replace(/\/$/, "")
       }
 
       // Handle protocol-relative URLs
       if (inputUrl.startsWith("//")) {
         const baseUrlObj = new URL(baseUrl)
-        return `${baseUrlObj.protocol}${inputUrl}`
+        const url = new URL(`${baseUrlObj.protocol}${inputUrl}`)
+        return url.href.replace(/\/$/, "")
       }
 
       // Handle relative URLs
-      return new URL(inputUrl, baseUrl).href
+      const url = new URL(inputUrl, baseUrl)
+      return url.href.replace(/\/$/, "")
     } catch (e) {
       console.error("Error normalizing URL:", e)
       return ""
@@ -147,6 +146,7 @@ export default function ImageDownloader() {
     const linkElements = doc.querySelectorAll("a")
 
     const links: string[] = []
+    const seenUrls = new Set<string>()
 
     linkElements.forEach((link) => {
       const href = link.getAttribute("href")
@@ -157,17 +157,24 @@ export default function ImageDownloader() {
         href.startsWith("#") ||
         href.startsWith("javascript:") ||
         href.startsWith("mailto:") ||
-        href.startsWith("tel:")
+        href.startsWith("tel:") ||
+        href === "/"
       ) {
         return
       }
 
       const normalizedUrl = normalizeUrl(href, baseUrl)
 
+      // Skip empty URLs and ones we've already seen in this extraction
+      if (!normalizedUrl || seenUrls.has(normalizedUrl)) {
+        return
+      }
+
+      seenUrls.add(normalizedUrl)
+
       if (
-        normalizedUrl &&
-        ((!crawlSettings.includeExternalDomains && isSameDomain(normalizedUrl, baseUrl)) ||
-          crawlSettings.includeExternalDomains)
+        (!crawlSettings.includeExternalDomains && isSameDomain(normalizedUrl, baseUrl)) ||
+        crawlSettings.includeExternalDomains
       ) {
         links.push(normalizedUrl)
       }
@@ -225,6 +232,9 @@ export default function ImageDownloader() {
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
   const crawlPage = async (pageUrl: string, depth: number): Promise<void> => {
+    // Normalize the page URL for consistent checking
+    const normalizedPageUrl = normalizeUrl(pageUrl, pageUrl)
+
     // Check if we've reached the maximum number of pages
     if (pagesVisitedRef.current >= maxPagesRef.current) {
       addLog(`Maximum page limit (${maxPagesRef.current}) reached. Stopping crawl.`, "warning")
@@ -232,8 +242,14 @@ export default function ImageDownloader() {
       return
     }
 
+    // Check if we've already visited this URL
+    if (visitedUrls.has(normalizedPageUrl)) {
+      addLog(`Skipping already visited URL: ${normalizedPageUrl}`, "info")
+      return
+    }
+
     // Check other conditions
-    if (visitedUrls.has(pageUrl) || depth > crawlSettings.maxDepth || !loadingRef.current) {
+    if (depth > crawlSettings.maxDepth || !loadingRef.current) {
       return
     }
 
@@ -241,12 +257,12 @@ export default function ImageDownloader() {
       // Increment the pages visited counter
       pagesVisitedRef.current += 1
 
-      setStatus(`Crawling page: ${pageUrl} (Depth: ${depth})`)
-      addLog(`Crawling page at depth ${depth}`, "info", pageUrl)
+      setStatus(`Crawling page: ${normalizedPageUrl} (Depth: ${depth})`)
+      addLog(`Crawling page at depth ${depth}`, "info", normalizedPageUrl)
 
       // Add to visited URLs
       const updatedVisited = new Set(visitedUrls)
-      updatedVisited.add(pageUrl)
+      updatedVisited.add(normalizedPageUrl)
       setVisitedUrls(updatedVisited)
 
       // Update recently visited pages
@@ -323,10 +339,18 @@ export default function ImageDownloader() {
           return prev
         }
 
-        const newLinks = links.filter((link) => !visitedUrls.has(link) && !prev.includes(link))
+        // Filter out URLs we've already visited or queued
+        const newLinks = links.filter((link) => {
+          const normalizedLink = normalizeUrl(link, pageUrl)
+          return !visitedUrls.has(normalizedLink) && !prev.includes(normalizedLink)
+        })
+
         if (newLinks.length > 0) {
           addLog(`Added ${newLinks.length} new links to the queue`, "info")
+        } else {
+          addLog(`No new links found to add to the queue`, "info")
         }
+
         return [...prev, ...newLinks]
       })
 
@@ -363,6 +387,18 @@ export default function ImageDownloader() {
 
       // Get the next URL from the queue
       const nextUrl = urlQueue[0]
+
+      // Debug log to see what URL we're processing
+      addLog(`Processing next URL from queue: ${nextUrl}`, "info")
+
+      // Check if we've already visited this URL
+      if (visitedUrls.has(normalizeUrl(nextUrl, nextUrl))) {
+        addLog(`Skipping already visited URL: ${nextUrl}`, "info")
+        setUrlQueue((prev) => prev.slice(1))
+        isProcessingRef.current = false
+        processQueue()
+        return
+      }
 
       // Update the queue state
       setUrlQueue((prev) => prev.slice(1))
@@ -439,13 +475,16 @@ export default function ImageDownloader() {
     }
 
     try {
+      // Normalize the starting URL
+      const normalizedStartUrl = normalizeUrl(url, url)
+
       // Reset all state
       setLoading(true)
       setError("")
       setStatus("Starting crawl...")
       setImages([])
-      setVisitedUrls(new Set())
-      setUrlQueue([url])
+      setVisitedUrls(new Set([normalizedStartUrl])) // Pre-add the normalized URL
+      setUrlQueue([normalizedStartUrl])
       setProgress(0)
       setCurrentStats({
         pagesVisited: 0,
@@ -460,7 +499,7 @@ export default function ImageDownloader() {
       pagesVisitedRef.current = 0
       maxPagesRef.current = crawlSettings.maxPages
 
-      addLog(`Starting crawl from ${url}`, "info", url)
+      addLog(`Starting crawl from ${normalizedStartUrl}`, "info", normalizedStartUrl)
       addLog(`Maximum pages set to ${maxPagesRef.current}`, "info")
 
       // The queue processing will be handled by the useEffect
