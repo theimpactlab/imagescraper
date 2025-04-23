@@ -385,23 +385,25 @@ export default function ImageDownloader() {
     try {
       isProcessingRef.current = true
 
-      // Get the next URL from the queue
+      // Get the next URL from the queue and remove it immediately
       const nextUrl = urlQueue[0]
+      setUrlQueue((prev) => prev.slice(1))
 
       // Debug log to see what URL we're processing
       addLog(`Processing next URL from queue: ${nextUrl}`, "info")
 
       // Check if we've already visited this URL
-      if (visitedUrls.has(normalizeUrl(nextUrl, nextUrl))) {
+      const normalizedUrl = normalizeUrl(nextUrl, nextUrl)
+      if (visitedUrls.has(normalizedUrl)) {
         addLog(`Skipping already visited URL: ${nextUrl}`, "info")
-        setUrlQueue((prev) => prev.slice(1))
+
+        // Important: Release the processing lock and continue with the next URL
         isProcessingRef.current = false
-        processQueue()
+
+        // Use setTimeout to avoid stack overflow with recursive calls
+        setTimeout(processQueue, 0)
         return
       }
-
-      // Update the queue state
-      setUrlQueue((prev) => prev.slice(1))
 
       // Calculate current depth based on the starting URL
       const baseUrlObj = new URL(url)
@@ -436,13 +438,22 @@ export default function ImageDownloader() {
       processQueue()
     }
 
+    // Add a safety check to detect if we're stuck in a loop with the same URL
+    if (loading && urlQueue.length > 0) {
+      const allSameUrl = urlQueue.every((queuedUrl) => queuedUrl === urlQueue[0])
+      if (allSameUrl && urlQueue.length > 5) {
+        addLog(`Detected queue loop with URL: ${urlQueue[0]}. Clearing queue.`, "warning")
+        setUrlQueue([])
+      }
+    }
+
     // Cleanup function to clear any timeouts
     return () => {
       if (queueProcessorTimeoutRef.current) {
         clearTimeout(queueProcessorTimeoutRef.current)
       }
     }
-  }, [loading, urlQueue.length])
+  }, [loading, urlQueue])
 
   // Effect to check if crawling is complete
   useEffect(() => {
@@ -483,8 +494,14 @@ export default function ImageDownloader() {
       setError("")
       setStatus("Starting crawl...")
       setImages([])
-      setVisitedUrls(new Set([normalizedStartUrl])) // Pre-add the normalized URL
+
+      // Create a new visited URLs set with the normalized start URL
+      const newVisitedUrls = new Set([normalizedStartUrl])
+      setVisitedUrls(newVisitedUrls)
+
+      // Add the normalized URL to the queue
       setUrlQueue([normalizedStartUrl])
+
       setProgress(0)
       setCurrentStats({
         pagesVisited: 0,
