@@ -72,6 +72,10 @@ export default function ImageDownloader() {
   const queueProcessorTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const pagesVisitedRef = useRef(0)
   const maxPagesRef = useRef(crawlSettings.maxPages)
+  
+  // Use a ref for visited URLs to avoid stale state issues
+  const visitedUrlsRef = useRef<Set<string>>(new Set())
+  const urlQueueRef = useRef<string[]>([])
 
   // Update the refs when state changes
   useEffect(() => {
@@ -80,6 +84,8 @@ export default function ImageDownloader() {
     // If we're not loading, reset the pages visited counter
     if (!loading) {
       pagesVisitedRef.current = 0
+      visitedUrlsRef.current = new Set()
+      urlQueueRef.current = []
     }
   }, [loading])
 
@@ -87,6 +93,16 @@ export default function ImageDownloader() {
   useEffect(() => {
     maxPagesRef.current = crawlSettings.maxPages
   }, [crawlSettings.maxPages])
+
+  // Sync the URL queue ref with state
+  useEffect(() => {
+    urlQueueRef.current = urlQueue
+  }, [urlQueue])
+
+  // Sync the visited URLs ref with state
+  useEffect(() => {
+    visitedUrlsRef.current = visitedUrls
+  }, [visitedUrls])
 
   // Add a log entry
   const addLog = (message: string, type: "info" | "error" | "success" | "warning", url?: string) => {
@@ -247,8 +263,8 @@ export default function ImageDownloader() {
       return
     }
 
-    // Check if we've already visited this URL
-    if (visitedUrls.has(normalizedPageUrl)) {
+    // Check if we've already visited this URL using the ref for immediate access
+    if (visitedUrlsRef.current.has(normalizedPageUrl)) {
       addLog(`Skipping already visited URL: ${normalizedPageUrl}`, "info")
       return
     }
@@ -259,18 +275,15 @@ export default function ImageDownloader() {
     }
 
     try {
+      // Add to visited URLs BEFORE processing to prevent duplicate processing
+      visitedUrlsRef.current.add(normalizedPageUrl)
+      setVisitedUrls(new Set(visitedUrlsRef.current))
+
       // Increment the pages visited counter
       pagesVisitedRef.current += 1
 
       setStatus(`Crawling page: ${normalizedPageUrl} (Depth: ${depth})`)
       addLog(`Crawling page at depth ${depth}`, "info", normalizedPageUrl)
-
-      // Add to visited URLs BEFORE processing to prevent duplicate processing
-      setVisitedUrls((prev) => {
-        const updated = new Set(prev)
-        updated.add(normalizedPageUrl)
-        return updated
-      })
 
       // Update recently visited pages
       setRecentlyVisitedPages((prev) => {
@@ -340,26 +353,26 @@ export default function ImageDownloader() {
       addLog(`Found ${links.length} links on page`, "info", pageUrl)
 
       // Add new links to queue, but only if we haven't reached the max pages
-      setUrlQueue((prev) => {
-        // If we've already reached the max pages, don't add more links
-        if (pagesVisitedRef.current >= maxPagesRef.current) {
-          return prev
-        }
-
-        // Filter out URLs we've already visited or queued
-        const newLinks = links.filter((link) => {
-          const normalizedLink = normalizeUrl(link, pageUrl)
-          return normalizedLink && !visitedUrls.has(normalizedLink) && !prev.includes(normalizedLink)
-        })
-
-        if (newLinks.length > 0) {
-          addLog(`Added ${newLinks.length} new links to the queue`, "info")
-        } else {
-          addLog(`No new links found to add to the queue`, "info")
-        }
-
-        return [...prev, ...newLinks]
+      const newLinks = links.filter((link) => {
+        const normalizedLink = normalizeUrl(link, pageUrl)
+        // Check against both the ref and the current queue to avoid race conditions
+        return (
+          normalizedLink && 
+          !visitedUrlsRef.current.has(normalizedLink) && 
+          !urlQueueRef.current.includes(normalizedLink)
+        )
       })
+
+      if (newLinks.length > 0) {
+        addLog(`Adding ${newLinks.length} new links to the queue`, "info")
+        setUrlQueue((prev) => {
+          const updatedQueue = [...prev, ...newLinks]
+          urlQueueRef.current = updatedQueue
+          return updatedQueue
+        })
+      } else {
+        addLog(`No new links found to add to the queue`, "info")
+      }
 
       // Wait before next request to avoid overwhelming the server
       await delay(crawlSettings.delayBetweenRequests)
@@ -385,7 +398,7 @@ export default function ImageDownloader() {
     }
 
     // If we're already processing, not loading, or the queue is empty, don't continue
-    if (isProcessingRef.current || !loadingRef.current || urlQueue.length === 0) {
+    if (isProcessingRef.current || !loadingRef.current || urlQueueRef.current.length === 0) {
       return
     }
 
@@ -393,17 +406,19 @@ export default function ImageDownloader() {
       isProcessingRef.current = true
 
       // Get the next URL from the queue
-      const nextUrl = urlQueue[0]
-
+      const nextUrl = urlQueueRef.current[0]
+      
       // Remove it from the queue immediately to prevent reprocessing
-      setUrlQueue((prev) => prev.slice(1))
+      const updatedQueue = urlQueueRef.current.slice(1)
+      urlQueueRef.current = updatedQueue
+      setUrlQueue(updatedQueue)
 
       // Debug log to see what URL we're processing
       addLog(`Processing next URL from queue: ${nextUrl}`, "info")
 
-      // Check if we've already visited this URL
+      // Check if we've already visited this URL using the ref
       const normalizedUrl = normalizeUrl(nextUrl, nextUrl)
-      if (visitedUrls.has(normalizedUrl)) {
+      if (visitedUrlsRef.current.has(normalizedUrl)) {
         addLog(`Skipping already visited URL: ${nextUrl}`, "info")
 
         // Important: Release the processing lock and continue with the next URL
@@ -460,7 +475,9 @@ export default function ImageDownloader() {
         )
 
         // Filter the queue to only contain unique URLs
-        setUrlQueue(Array.from(uniqueUrls))
+        const uniqueUrlArray = Array.from(uniqueUrls)
+        urlQueueRef.current = uniqueUrlArray
+        setUrlQueue(uniqueUrlArray)
         addLog(`Cleaned queue to contain only unique URLs.`, "info")
       }
 
@@ -468,6 +485,7 @@ export default function ImageDownloader() {
       const allSameUrl = urlQueue.length > 5 && urlQueue.every((queuedUrl) => queuedUrl === urlQueue[0])
       if (allSameUrl) {
         addLog(`Detected queue loop with URL: ${urlQueue[0]}. Clearing queue.`, "warning")
+        urlQueueRef.current = []
         setUrlQueue([])
       }
     }
@@ -478,7 +496,7 @@ export default function ImageDownloader() {
         clearTimeout(queueProcessorTimeoutRef.current)
       }
     }
-  }, [loading, urlQueue, visitedUrls])
+  }, [loading, urlQueue])
 
   // Effect to check if crawling is complete
   useEffect(() => {
@@ -489,7 +507,7 @@ export default function ImageDownloader() {
           setLoading(false)
           setStatus(`Crawling complete. Found ${images.length} images from ${pagesVisitedRef.current} pages.`)
           addLog(
-            `Crawling complete. Found ${images.length} images from ${images.length} images from ${pagesVisitedRef.current} pages.`,
+            `Crawling complete. Found ${images.length} images from ${pagesVisitedRef.current} pages.`,
             "success",
           )
         }
@@ -520,11 +538,19 @@ export default function ImageDownloader() {
       setStatus("Starting crawl...")
       setImages([])
 
+      // Reset refs
+      isProcessingRef.current = false
+      pagesVisitedRef.current = 0
+      maxPagesRef.current = crawlSettings.maxPages
+      visitedUrlsRef.current = new Set()
+      urlQueueRef.current = []
+
       // Create a new visited URLs set with the normalized start URL
-      const newVisitedUrls = new Set([normalizedStartUrl])
-      setVisitedUrls(newVisitedUrls)
+      visitedUrlsRef.current = new Set()
+      setVisitedUrls(new Set())
 
       // Add the normalized URL to the queue
+      urlQueueRef.current = [normalizedStartUrl]
       setUrlQueue([normalizedStartUrl])
 
       setProgress(0)
@@ -535,11 +561,6 @@ export default function ImageDownloader() {
       })
       setCrawlLogs([])
       setRecentlyVisitedPages([])
-
-      // Reset refs
-      isProcessingRef.current = false
-      pagesVisitedRef.current = 0
-      maxPagesRef.current = crawlSettings.maxPages
 
       addLog(`Starting crawl from ${normalizedStartUrl}`, "info", normalizedStartUrl)
       addLog(`Maximum pages set to ${maxPagesRef.current}`, "info")
@@ -554,6 +575,7 @@ export default function ImageDownloader() {
 
   const stopCrawling = () => {
     setLoading(false)
+    urlQueueRef.current = []
     setUrlQueue([])
     const message = `Crawling stopped. Found ${images.length} images from ${pagesVisitedRef.current} pages.`
     setStatus(message)
@@ -761,6 +783,9 @@ export default function ImageDownloader() {
               <h3 className="text-sm font-medium mb-2">Recently Visited Pages:</h3>
               <div className="flex flex-wrap gap-2">
                 {recentlyVisitedPages.map((page, index) => (
+                  <TooltipProvider key={index}>
+                    <Tooltip>
+                        => (
                   <TooltipProvider key={index}>
                     <Tooltip>
                       <TooltipTrigger asChild>
