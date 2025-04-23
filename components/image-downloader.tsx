@@ -110,20 +110,20 @@ export default function ImageDownloader() {
       // Handle absolute URLs
       if (inputUrl.startsWith("http")) {
         const url = new URL(inputUrl)
-        // Remove trailing slashes for consistency
-        return url.href.replace(/\/$/, "")
+        // Remove trailing slashes, fragments, and normalize to lowercase for consistent comparison
+        return url.origin + url.pathname.replace(/\/$/, "").toLowerCase() + (url.search || "")
       }
 
       // Handle protocol-relative URLs
       if (inputUrl.startsWith("//")) {
         const baseUrlObj = new URL(baseUrl)
         const url = new URL(`${baseUrlObj.protocol}${inputUrl}`)
-        return url.href.replace(/\/$/, "")
+        return url.origin + url.pathname.replace(/\/$/, "").toLowerCase() + (url.search || "")
       }
 
       // Handle relative URLs
       const url = new URL(inputUrl, baseUrl)
-      return url.href.replace(/\/$/, "")
+      return url.origin + url.pathname.replace(/\/$/, "").toLowerCase() + (url.search || "")
     } catch (e) {
       console.error("Error normalizing URL:", e)
       return ""
@@ -235,6 +235,11 @@ export default function ImageDownloader() {
     // Normalize the page URL for consistent checking
     const normalizedPageUrl = normalizeUrl(pageUrl, pageUrl)
 
+    if (!normalizedPageUrl) {
+      addLog(`Skipping invalid URL: ${pageUrl}`, "warning")
+      return
+    }
+
     // Check if we've reached the maximum number of pages
     if (pagesVisitedRef.current >= maxPagesRef.current) {
       addLog(`Maximum page limit (${maxPagesRef.current}) reached. Stopping crawl.`, "warning")
@@ -260,10 +265,12 @@ export default function ImageDownloader() {
       setStatus(`Crawling page: ${normalizedPageUrl} (Depth: ${depth})`)
       addLog(`Crawling page at depth ${depth}`, "info", normalizedPageUrl)
 
-      // Add to visited URLs
-      const updatedVisited = new Set(visitedUrls)
-      updatedVisited.add(normalizedPageUrl)
-      setVisitedUrls(updatedVisited)
+      // Add to visited URLs BEFORE processing to prevent duplicate processing
+      setVisitedUrls((prev) => {
+        const updated = new Set(prev)
+        updated.add(normalizedPageUrl)
+        return updated
+      })
 
       // Update recently visited pages
       setRecentlyVisitedPages((prev) => {
@@ -342,7 +349,7 @@ export default function ImageDownloader() {
         // Filter out URLs we've already visited or queued
         const newLinks = links.filter((link) => {
           const normalizedLink = normalizeUrl(link, pageUrl)
-          return !visitedUrls.has(normalizedLink) && !prev.includes(normalizedLink)
+          return normalizedLink && !visitedUrls.has(normalizedLink) && !prev.includes(normalizedLink)
         })
 
         if (newLinks.length > 0) {
@@ -385,8 +392,10 @@ export default function ImageDownloader() {
     try {
       isProcessingRef.current = true
 
-      // Get the next URL from the queue and remove it immediately
+      // Get the next URL from the queue
       const nextUrl = urlQueue[0]
+
+      // Remove it from the queue immediately to prevent reprocessing
       setUrlQueue((prev) => prev.slice(1))
 
       // Debug log to see what URL we're processing
@@ -401,7 +410,7 @@ export default function ImageDownloader() {
         isProcessingRef.current = false
 
         // Use setTimeout to avoid stack overflow with recursive calls
-        setTimeout(processQueue, 0)
+        queueProcessorTimeoutRef.current = setTimeout(processQueue, 0)
         return
       }
 
@@ -440,8 +449,24 @@ export default function ImageDownloader() {
 
     // Add a safety check to detect if we're stuck in a loop with the same URL
     if (loading && urlQueue.length > 0) {
-      const allSameUrl = urlQueue.every((queuedUrl) => queuedUrl === urlQueue[0])
-      if (allSameUrl && urlQueue.length > 5) {
+      // Check if there are duplicate URLs in the queue
+      const uniqueUrls = new Set(urlQueue)
+
+      // If we have significantly fewer unique URLs than total URLs, we might be in a loop
+      if (uniqueUrls.size < urlQueue.length / 2 && urlQueue.length > 10) {
+        addLog(
+          `Detected potential queue loop. Queue has ${urlQueue.length} URLs but only ${uniqueUrls.size} unique URLs.`,
+          "warning",
+        )
+
+        // Filter the queue to only contain unique URLs
+        setUrlQueue(Array.from(uniqueUrls))
+        addLog(`Cleaned queue to contain only unique URLs.`, "info")
+      }
+
+      // Also check for the specific case where the same URL appears multiple times in a row
+      const allSameUrl = urlQueue.length > 5 && urlQueue.every((queuedUrl) => queuedUrl === urlQueue[0])
+      if (allSameUrl) {
         addLog(`Detected queue loop with URL: ${urlQueue[0]}. Clearing queue.`, "warning")
         setUrlQueue([])
       }
@@ -453,7 +478,7 @@ export default function ImageDownloader() {
         clearTimeout(queueProcessorTimeoutRef.current)
       }
     }
-  }, [loading, urlQueue])
+  }, [loading, urlQueue, visitedUrls])
 
   // Effect to check if crawling is complete
   useEffect(() => {
