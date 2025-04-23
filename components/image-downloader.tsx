@@ -662,7 +662,15 @@ export default function ImageDownloader() {
 
   // Function to get proxied image URL for display
   const getProxiedImageUrl = (originalUrl: string) => {
-    return `/api/image-proxy?url=${encodeURIComponent(originalUrl)}`
+    // Make sure the URL is properly encoded
+    try {
+      // Validate the URL first
+      new URL(originalUrl)
+      return `/api/image-proxy?url=${encodeURIComponent(originalUrl)}`
+    } catch (e) {
+      console.error("Invalid image URL:", originalUrl)
+      return "/abstract-geometric-shapes.png" // Fallback to default image
+    }
   }
 
   return (
@@ -845,7 +853,10 @@ export default function ImageDownloader() {
                         alt={image.filename}
                         className="max-h-full max-w-full object-contain"
                         onError={(e) => {
+                          console.error(`Failed to load image: ${image.url}`)
                           ;(e.target as HTMLImageElement).src = "/abstract-geometric-shapes.png"
+                          // Add a data attribute to mark this image as failed
+                          ;(e.target as HTMLImageElement).dataset.loadFailed = "true"
                         }}
                       />
                     </div>
