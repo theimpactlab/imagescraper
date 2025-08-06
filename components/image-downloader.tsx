@@ -1,6 +1,7 @@
 "use client"
 
 import { DialogTrigger } from "@/components/ui/dialog"
+import type { CrawlLog } from "@/types/crawl-log" // Declare the CrawlLog variable
 
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
@@ -30,6 +31,7 @@ interface ImageItem {
   type?: string
   loadFailed?: boolean
   retryCount?: number
+  qualityScore?: number
 }
 
 interface CrawlSettings {
@@ -39,13 +41,11 @@ interface CrawlSettings {
   delayBetweenRequests: number
   includeSvgImages: boolean
   maxRetries: number
-}
-
-interface CrawlLog {
-  timestamp: Date
-  message: string
-  type: "info" | "error" | "success" | "warning"
-  url?: string
+  minImageWidth: number
+  minImageHeight: number
+  minImageFileSize: number
+  excludeCommonIcons: boolean
+  excludeTrackingPixels: boolean
 }
 
 export default function ImageDownloader() {
@@ -64,6 +64,11 @@ export default function ImageDownloader() {
     delayBetweenRequests: 1000,
     includeSvgImages: false,
     maxRetries: 1,
+    minImageWidth: 100,
+    minImageHeight: 100,
+    minImageFileSize: 5000, // 5KB minimum
+    excludeCommonIcons: true,
+    excludeTrackingPixels: true,
   })
   const [currentStats, setCurrentStats] = useState({
     pagesVisited: 0,
@@ -189,6 +194,124 @@ export default function ImageDownloader() {
     }
   }
 
+  const isLowQualityImage = (imgUrl: string, width?: number, height?: number): boolean => {
+    try {
+      const url = new URL(imgUrl)
+      const pathname = url.pathname.toLowerCase()
+      const filename = pathname.split("/").pop() || ""
+
+      // Check for tracking pixels and very small images
+      if (crawlSettings.excludeTrackingPixels) {
+        if ((width && width <= 2) || (height && height <= 2)) {
+          return true
+        }
+
+        // Common tracking pixel patterns
+        const trackingPatterns = [
+          "pixel",
+          "track",
+          "beacon",
+          "analytics",
+          "counter",
+          "1x1",
+          "transparent",
+          "spacer",
+          "blank",
+        ]
+        if (trackingPatterns.some((pattern) => filename.includes(pattern))) {
+          return true
+        }
+      }
+
+      // Check for common icon patterns
+      if (crawlSettings.excludeCommonIcons) {
+        const iconPatterns = [
+          "icon",
+          "favicon",
+          "logo",
+          "sprite",
+          "bullet",
+          "arrow",
+          "button",
+          "badge",
+          "social",
+          "share",
+          "rss",
+        ]
+        if (iconPatterns.some((pattern) => filename.includes(pattern))) {
+          return true
+        }
+
+        // Common icon sizes
+        if (width && height) {
+          const commonIconSizes = [
+            [16, 16],
+            [24, 24],
+            [32, 32],
+            [48, 48],
+            [64, 64],
+            [128, 128],
+            [256, 256],
+          ]
+          if (commonIconSizes.some(([w, h]) => width === w && height === h)) {
+            return true
+          }
+        }
+      }
+
+      // Check minimum dimensions
+      if (width && width < crawlSettings.minImageWidth) {
+        return true
+      }
+      if (height && height < crawlSettings.minImageHeight) {
+        return true
+      }
+
+      // Check for very thin banners (likely ads)
+      if (width && height) {
+        const aspectRatio = width / height
+        if (aspectRatio > 10 || aspectRatio < 0.1) {
+          return true
+        }
+      }
+
+      return false
+    } catch (e) {
+      return false
+    }
+  }
+
+  const getImageQualityScore = (imgUrl: string, width?: number, height?: number): number => {
+    let score = 0
+
+    // Size score (larger is generally better, up to a point)
+    if (width && height) {
+      const area = width * height
+      if (area > 50000)
+        score += 3 // Large images
+      else if (area > 10000)
+        score += 2 // Medium images
+      else if (area > 2500) score += 1 // Small but acceptable images
+    }
+
+    // Aspect ratio score (prefer reasonable aspect ratios)
+    if (width && height) {
+      const aspectRatio = width / height
+      if (aspectRatio >= 0.5 && aspectRatio <= 2) {
+        score += 2 // Good aspect ratio
+      } else if (aspectRatio >= 0.25 && aspectRatio <= 4) {
+        score += 1 // Acceptable aspect ratio
+      }
+    }
+
+    // File type score
+    const type = getImageType(imgUrl)
+    if (type === "jpeg" || type === "png") score += 1
+    if (type === "webp" || type === "avif") score += 2
+
+    return score
+  }
+
   const extractLinks = (html: string, baseUrl: string): string[] => {
     const parser = new DOMParser()
     const doc = parser.parseFromString(html, "text/html")
@@ -260,6 +383,15 @@ export default function ImageDownloader() {
         return
       }
 
+      // Try to get width and height from attributes
+      const width = Number.parseInt(img.getAttribute("width") || "0", 10) || undefined
+      const height = Number.parseInt(img.getAttribute("height") || "0", 10) || undefined
+
+      // Check if this is a low quality image
+      if (isLowQualityImage(imgUrl, width, height)) {
+        return
+      }
+
       // Extract filename from URL
       const urlParts = imgUrl.split("/")
       let filename = urlParts[urlParts.length - 1].split("?")[0]
@@ -269,9 +401,8 @@ export default function ImageDownloader() {
         filename = `image-${pageUrl.replace(/[^a-zA-Z0-9]/g, "-")}-${index + 1}.jpg`
       }
 
-      // Try to get width and height from attributes
-      const width = Number.parseInt(img.getAttribute("width") || "0", 10) || undefined
-      const height = Number.parseInt(img.getAttribute("height") || "0", 10) || undefined
+      // Calculate quality score
+      const qualityScore = getImageQualityScore(imgUrl, width, height)
 
       extractedImages.push({
         url: imgUrl,
@@ -283,10 +414,12 @@ export default function ImageDownloader() {
         type,
         loadFailed: false,
         retryCount: 0,
+        qualityScore,
       })
     })
 
-    return extractedImages
+    // Sort by quality score (highest first) and return
+    return extractedImages.sort((a, b) => (b.qualityScore || 0) - (a.qualityScore || 0))
   }
 
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -857,6 +990,60 @@ export default function ImageDownloader() {
                 <p className="text-xs text-gray-500">Number of times to retry loading failed images</p>
               </div>
 
+              <div className="space-y-2">
+                <Label>Minimum Image Width (px): {crawlSettings.minImageWidth}</Label>
+                <Slider
+                  value={[crawlSettings.minImageWidth]}
+                  min={50}
+                  max={500}
+                  step={10}
+                  onValueChange={(value) => setCrawlSettings({ ...crawlSettings, minImageWidth: value[0] })}
+                />
+                <p className="text-xs text-gray-500">Filter out images narrower than this width</p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Minimum Image Height (px): {crawlSettings.minImageHeight}</Label>
+                <Slider
+                  value={[crawlSettings.minImageHeight]}
+                  min={50}
+                  max={500}
+                  step={10}
+                  onValueChange={(value) => setCrawlSettings({ ...crawlSettings, minImageHeight: value[0] })}
+                />
+                <p className="text-xs text-gray-500">Filter out images shorter than this height</p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Minimum File Size (KB): {Math.round(crawlSettings.minImageFileSize / 1000)}</Label>
+                <Slider
+                  value={[crawlSettings.minImageFileSize]}
+                  min={1000}
+                  max={50000}
+                  step={1000}
+                  onValueChange={(value) => setCrawlSettings({ ...crawlSettings, minImageFileSize: value[0] })}
+                />
+                <p className="text-xs text-gray-500">Filter out images smaller than this file size</p>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <Switch
+                  checked={crawlSettings.excludeCommonIcons}
+                  onCheckedChange={(checked) => setCrawlSettings({ ...crawlSettings, excludeCommonIcons: checked })}
+                />
+                <Label>Exclude Common Icons</Label>
+              </div>
+              <p className="text-xs text-gray-500">Filter out likely icons, logos, and UI elements</p>
+
+              <div className="flex items-center space-x-2">
+                <Switch
+                  checked={crawlSettings.excludeTrackingPixels}
+                  onCheckedChange={(checked) => setCrawlSettings({ ...crawlSettings, excludeTrackingPixels: checked })}
+                />
+                <Label>Exclude Tracking Pixels</Label>
+              </div>
+              <p className="text-xs text-gray-500">Filter out 1x1 tracking pixels and spacer images</p>
+
               <div className="flex items-center space-x-2">
                 <Switch
                   checked={crawlSettings.includeExternalDomains}
@@ -964,7 +1151,7 @@ export default function ImageDownloader() {
                 </div>
                 <div className="flex gap-2">
                   <div className="flex items-center gap-2 mr-4">
-                    <Button variant="outline" size="sm" className="flex items-center gap-1">
+                    <Button variant="outline" size="sm" className="flex items-center gap-1 bg-transparent">
                       <Filter className="h-4 w-4" />
                       <select
                         className="bg-transparent border-none focus:outline-none text-sm"
@@ -1029,6 +1216,16 @@ export default function ImageDownloader() {
                       {image.type && (
                         <Badge variant="secondary" className="absolute top-2 right-2 text-xs">
                           {image.type.toUpperCase()}
+                        </Badge>
+                      )}
+                      {image.qualityScore !== undefined && (
+                        <Badge
+                          variant={
+                            image.qualityScore >= 4 ? "default" : image.qualityScore >= 2 ? "secondary" : "outline"
+                          }
+                          className="absolute bottom-2 right-2 text-xs"
+                        >
+                          Q: {image.qualityScore}
                         </Badge>
                       )}
                       {isYouTubeThumbnail(image.url) && (
